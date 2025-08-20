@@ -13,6 +13,7 @@ import upath.implementations.http
 import yaml
 from cdshealpix.skymap.skymap import Skymap
 from pyarrow.dataset import Dataset
+from pyarrow.fs import S3FileSystem
 from upath import UPath
 
 from hats.io.file_io.file_pointer import get_upath
@@ -148,67 +149,35 @@ def write_dataframe_to_parquet(dataframe: pd.DataFrame, file_pointer):
     dataframe.to_parquet(file_pointer.path, filesystem=file_pointer.fs)
 
 
-def read_parquet_metadata(file_pointer: str | Path | UPath, **kwargs) -> pq.FileMetaData:
-    """Read FileMetaData from footer of a single Parquet file.
-
-    Args:
-        file_pointer: location of file to read metadata from
-        **kwargs: additional arguments to be passed to pyarrow.parquet.read_metadata
-    """
-    file_pointer = get_upath(file_pointer)
-    if file_pointer is None or not file_pointer.exists():
-        raise FileNotFoundError("Parquet file does not exist")
-    parquet_file = pq.read_metadata(file_pointer.path, filesystem=file_pointer.fs, **kwargs)
-    return parquet_file
+def upath_to_pa_s3fs(upath):
+    return upath.path, S3FileSystem(anonymous=True)
 
 
-def read_parquet_file(file_pointer: str | Path | UPath, **kwargs) -> pq.ParquetFile:
-    """Read single parquet file.
-
-    Args:
-        file_pointer: location of parquet file
-        **kwargs: additional arguments to be passed to pyarrow.parquet.ParquetFile
-    """
-    file_pointer = get_upath(file_pointer)
-    if file_pointer is None or not file_pointer.exists():
-        raise FileNotFoundError("Parquet file does not exist")
-    return pq.ParquetFile(file_pointer.path, filesystem=file_pointer.fs, **kwargs)
+def read_parquet_metadata(file_pointer, **kwargs):
+    path, fs = upath_to_pa_s3fs(file_pointer)
+    return pq.read_metadata(path, filesystem=fs, **kwargs)
 
 
-def read_parquet_dataset(source: str | Path | UPath, **kwargs) -> tuple[UPath, Dataset]:
-    """Read parquet dataset from directory pointer or list of files.
+def read_parquet_file(file_pointer, **kwargs):
+    path, fs = upath_to_pa_s3fs(file_pointer)
+    return pq.ParquetFile(path, filesystem=fs, **kwargs)
 
-    Note that pyarrow.dataset reads require that directory pointers don't contain a
-    leading slash, and the protocol prefix may additionally be removed. As such, we also return
-    the directory path that is formatted for pyarrow ingestion for follow-up.
 
-    See more info on source specification and possible kwargs at
-    https://arrow.apache.org/docs/python/generated/pyarrow.dataset.dataset.html
-
-    Args:
-        source: directory, path, or list of paths to read data from
-
-    Returns:
-        Tuple containing a path to the dataset (that is formatted for pyarrow ingestion)
-        and the dataset read from disk.
-    """
+def read_parquet_dataset(source, **kwargs):
     if pd.api.types.is_list_like(source) and len(source) > 0:
         sample_pointer = source[0]
-        sample_pointer = get_upath(sample_pointer)
-        file_system = sample_pointer.fs
+        _sample_path, fs = upath_to_pa_s3fs(sample_pointer)
         source = [str(path) for path in source]
     else:
-        source = get_upath(source)
-        file_system = source.fs
-        source = source.path
+        source, fs = upath_to_pa_s3fs(sample_pointer)
 
     dataset = pds.dataset(
         source,
-        filesystem=file_system,
+        filesystem=fs,
         format="parquet",
         **kwargs,
     )
-    return (str(source), dataset)
+    return str(source), dataset
 
 
 def write_parquet_metadata(
@@ -297,30 +266,9 @@ def unnest_headers_for_pandas(storage_options: dict | None) -> dict | None:
     return storage_options
 
 
-def read_parquet_file_to_pandas(file_pointer: str | Path | UPath, **kwargs) -> npd.NestedFrame:
-    """Reads parquet file(s) to a pandas DataFrame
-
-    Args:
-        file_pointer (UPath): File Pointer to a parquet file or a directory containing parquet files
-        **kwargs: Additional arguments to pass to pandas read_parquet method
-
-    Returns:
-        Pandas DataFrame with the data from the parquet file(s)
-    """
-    file_pointer = get_upath(file_pointer)
-    # If we are trying to read a directory over http, we need to send the explicit list of files instead.
-    # We don't want to get the list unnecessarily because it can be expensive.
-    if isinstance(file_pointer, upath.implementations.http.HTTPPath) and file_pointer.is_dir():
-        file_pointers = [f for f in file_pointer.iterdir() if f.is_file()]
-        return npd.read_parquet(
-            file_pointers,
-            filesystem=file_pointer.fs,
-            partitioning=None,  # Avoid the ArrowTypeError described in #367
-            **kwargs,
-        )
+def read_parquet_file_to_pandas(file_pointer, **kwargs):
     return npd.read_parquet(
-        file_pointer.path,
-        filesystem=file_pointer.fs,
-        partitioning=None,  # Avoid the ArrowTypeError described in #367
+        file_pointer.as_uri(),
+        partitioning=None,
         **kwargs,
     )
